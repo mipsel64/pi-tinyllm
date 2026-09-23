@@ -52,9 +52,9 @@ pi --provider tinyllm --model anthropic/claude-sonnet-4-6
 
 ## Behavior and limitations
 
-- Canonical TinyLLM namespaces map to same-named Pi catalogs. `codex` maps to `openai-codex`; `openai` prefers `openai-codex` metadata and then `openai`.
-- Generated OpenAI `-fast` IDs are filtered from discovery. Select an advertised base `openai/gpt-*` model, then run `/fast` to toggle TinyLLM fast routing for the current session. The command changes only the outgoing request ID; run it again to disable fast routing.
-- `/fast` is available only while a `tinyllm` `openai/gpt-*` model is selected. Other models are left unchanged and produce a warning. The toggle follows the active session branch and is restored on reload or resume.
+- Discovery uses TinyLLM's `/api/v1/models` endpoint. Provider descriptors expand every configured provider from Pi's matching installed catalog, including custom TinyLLM prefixes; a `404` falls back to `/v1/models` for explicit-ID discovery from older servers. Canonical `codex` maps to `openai-codex`, while canonical `openai` prefers `openai-codex` metadata and then `openai`. Expansion describes routable catalog models; it does not probe account-specific upstream entitlements.
+- Generated OpenAI `-fast` IDs are filtered from discovery. Select an advertised base `openai/gpt-*` model, then run `/fast` to toggle TinyLLM fast routing for the current session. The command changes only the outgoing request ID, and an enabled toggle appears as `fast` in Pi's status bar; run it again to disable fast routing.
+- `/fast` is available only while a TinyLLM model sourced from an OpenAI catalog has a native `gpt-*` ID. Other models are left unchanged and produce a warning. The toggle follows the active session branch and is restored on reload or resume.
 - Anthropic Messages, OpenAI Responses, and Chat Completions models use TinyLLM's corresponding routes.
 - Unknown aliases, unknown models, and models using unsupported wire APIs are omitted rather than assigned guessed metadata.
 - Pi owns the persisted model catalog. Failed refreshes retain the last known good catalog, and offline refreshes restore it.

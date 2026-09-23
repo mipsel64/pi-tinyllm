@@ -95,7 +95,7 @@ test("Anthropic fallback metadata remains local to the TinyLLM provider", () => 
 	);
 });
 
-test("discovery sends the exact URL, bearer credential, and abort signal", async () => {
+test("discovery uses the dedicated endpoint, preserves request auth, and falls back for older servers", async () => {
 	const controller = new AbortController();
 	let request: { input: string; init?: RequestInit } | undefined;
 	const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -111,9 +111,28 @@ test("discovery sends the exact URL, bearer credential, and abort signal", async
 		quiet,
 	);
 	assert.equal(models.length, 1);
-	assert.equal(request?.input, "http://gateway.test/v1/models");
+	assert.equal(request?.input, "http://gateway.test/api/v1/models");
 	assert.deepEqual(request?.init?.headers, { Authorization: "Bearer fixture-key" });
 	assert.equal(request?.init?.signal, controller.signal);
+
+	const fallbackRequests: string[] = [];
+	const fallback = await discoverModels(
+		"http://gateway.test",
+		"fixture-key",
+		controller.signal,
+		async (input) => {
+			fallbackRequests.push(String(input));
+			return fallbackRequests.length === 1
+				? new Response("not found", { status: 404 })
+				: Response.json({ data: [{ id: "anthropic/claude-sonnet-4-6" }] });
+		},
+		quiet,
+	);
+	assert.deepEqual(fallback.map(({ id }) => id), ["anthropic/claude-sonnet-4-6"]);
+	assert.deepEqual(fallbackRequests, [
+		"http://gateway.test/api/v1/models",
+		"http://gateway.test/v1/models",
+	]);
 
 	await assert.rejects(
 		discoverModels("http://gateway.test", "fixture-key", controller.signal, async () => new Response("no", { status: 500 }), quiet),
@@ -151,6 +170,43 @@ test("discovery sends the exact URL, bearer credential, and abort signal", async
 		),
 		/invalid payload/,
 	);
+});
+
+test("configured provider descriptors expand exact Pi catalogs, including custom prefixes", async () => {
+	const controller = new AbortController();
+	const models = await discoverModels(
+		"http://gateway.test",
+		"fixture-key",
+		controller.signal,
+		async () => Response.json({
+			data: [
+				{ id: "anthropic/claude-sonnet-4-6" },
+				{ id: "team-codex/gpt-5.5-fast" },
+			],
+			providers: [
+				{ id: "anthropic", type: "anthropic", auth: "subscription" },
+				{ id: "team-codex", type: "openai", auth: "subscription" },
+				{ id: "team-openai", type: "openai", auth: "api_key" },
+				{ id: "team-zai", type: "zai", auth: "api_key" },
+			],
+		}),
+		quiet,
+	);
+
+	assert.equal(models[0].id, "anthropic/claude-sonnet-4-6");
+	assert.ok(!models.some(({ id }) => id.endsWith("-fast")));
+	const claude = models.find(({ id }) => id === "anthropic/claude-fable-5");
+	const codex = models.find(({ id }) => id === "team-codex/gpt-5.5");
+	const openai = models.find(({ id }) => id === "team-openai/gpt-4.1");
+	const zai = models.find(({ id }) => id === "team-zai/glm-5.3");
+	assert.ok(claude && codex && openai && zai);
+	assert.deepEqual(
+		withoutRouting(claude),
+		withoutRouting(mapDiscoveredModels(["anthropic/claude-fable-5"], "http://gateway.test", quiet)[0]),
+	);
+	assert.deepEqual(withoutRouting(codex), withoutRouting(catalogModel("openai-codex", "gpt-5.5")));
+	assert.deepEqual(withoutRouting(openai), withoutRouting(catalogModel("openai", "gpt-4.1")));
+	assert.deepEqual(withoutRouting(zai), withoutRouting(catalogModel("zai", "glm-5.3")));
 });
 
 test("native auth prefers stored credentials, supports login, and stays unavailable without a key", async () => {
@@ -343,27 +399,34 @@ test("/fast toggles GPT payload routing, gates other models, survives model swit
 	assert.ok(command);
 
 	const notices: Array<[string, string]> = [];
+	const statuses: Array<[string, string | undefined]> = [];
 	const gptModels = mapDiscoveredModels(["openai/gpt-4.1-fast", "openai/gpt-4.1"], "http://gateway.test", quiet);
 	assert.equal(gptModels.length, 1);
 	const gpt = gptModels[0];
 	const anthropic = mapDiscoveredModels(["anthropic/claude-sonnet-4-6"], "http://gateway.test", quiet)[0];
 	const context = (model: Model<Api>, branch: unknown[] = []) => ({
 		model,
-		ui: { notify: (message: string, level: string) => notices.push([message, level]) },
+		ui: {
+			notify: (message: string, level: string) => notices.push([message, level]),
+			setStatus: (key: string, text: string | undefined) => statuses.push([key, text]),
+		},
 		sessionManager: { getBranch: () => branch },
 	});
 	const beforeRequest = handlers.get("before_provider_request")?.[0];
 	const sessionStart = handlers.get("session_start")?.[0];
-	assert.ok(beforeRequest && sessionStart);
+	const sessionTree = handlers.get("session_tree")?.[0];
+	assert.ok(beforeRequest && sessionStart && sessionTree);
 
 	await command("", context(gpt));
 	assert.deepEqual(entries.at(-1), { customType: "tinyllm-fast-mode", data: { enabled: true } });
+	assert.deepEqual(statuses.at(-1), ["tinyllm-fast-mode", "fast"]);
 	assert.deepEqual(
 		await beforeRequest({ payload: { model: "openai/gpt-4.1", input: "hello" } }, context(gpt)),
 		{ model: "openai/gpt-4.1-fast", input: "hello" },
 	);
 	const otherPayload = { model: anthropic.id };
 	assert.equal(await beforeRequest({ payload: otherPayload }, context(anthropic)), otherPayload);
+	assert.deepEqual(statuses.at(-1), ["tinyllm-fast-mode", "fast"]);
 	assert.deepEqual(
 		await beforeRequest({ payload: { model: "openai/gpt-4.1" } }, context(gpt)),
 		{ model: "openai/gpt-4.1-fast" },
@@ -373,10 +436,21 @@ test("/fast toggles GPT payload routing, gates other models, survives model swit
 	});
 
 	await command("", context(gpt));
+	assert.deepEqual(statuses.at(-1), ["tinyllm-fast-mode", undefined]);
 	assert.deepEqual(
 		await beforeRequest({ payload: { model: "openai/gpt-4.1" } }, context(gpt)),
 		{ model: "openai/gpt-4.1" },
 	);
+
+	const customGpt = { ...gpt, id: "team-codex/gpt-4.1" };
+	await command("", context(customGpt));
+	assert.deepEqual(
+		await beforeRequest({ payload: { model: customGpt.id } }, context(customGpt)),
+		{ model: "team-codex/gpt-4.1-fast" },
+	);
+	await command("", context(customGpt));
+	assert.deepEqual(statuses.at(-1), ["tinyllm-fast-mode", undefined]);
+
 	const entryCount = entries.length;
 	await command("", context(anthropic));
 	assert.equal(entries.length, entryCount);
@@ -387,10 +461,13 @@ test("/fast toggles GPT payload routing, gates other models, survives model swit
 		{},
 		context(gpt, [{ type: "custom", customType: "tinyllm-fast-mode", data: { enabled: true } }]),
 	);
+	assert.deepEqual(statuses.at(-1), ["tinyllm-fast-mode", "fast"]);
 	assert.deepEqual(
 		await beforeRequest({ payload: { model: "openai/gpt-4.1" } }, context(gpt)),
 		{ model: "openai/gpt-4.1-fast" },
 	);
+	await sessionTree({}, context(anthropic, []));
+	assert.deepEqual(statuses.at(-1), ["tinyllm-fast-mode", undefined]);
 });
 
 test("bounded bootstrap uses the provider refresh path without an extension cache", async () => {
