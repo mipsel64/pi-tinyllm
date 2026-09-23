@@ -101,7 +101,7 @@ test("discovery uses the dedicated endpoint, preserves request auth, and falls b
 	let request: { input: string; init?: RequestInit } | undefined;
 	const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
 		request = { input: String(input), init };
-		return Response.json({ data: [{ id: "anthropic/claude-sonnet-4-6" }] });
+		return Response.json({ configured_models: [{ id: "anthropic/claude-sonnet-4-6" }] });
 	}) as typeof fetch;
 
 	const models = await discoverModels(
@@ -180,7 +180,7 @@ test("configured provider descriptors expand exact Pi catalogs, including custom
 		"fixture-key",
 		controller.signal,
 		async () => Response.json({
-			data: [
+			configured_models: [
 				{ id: "anthropic/claude-sonnet-4-6" },
 				{ id: "team-codex/gpt-5.5-fast" },
 			],
@@ -287,7 +287,7 @@ test("discovery diagnostics sanitize and bound server-controlled IDs", () => {
 
 test("successful catalogs persist; failed, malformed, and offline refreshes retain last-known-good", async () => {
 	const store = new InMemoryModelsStore();
-	let response: Response = Response.json({ data: [{ id: "anthropic/claude-sonnet-4-6" }] });
+	let response: Response = Response.json({ configured_models: [{ id: "anthropic/claude-sonnet-4-6" }] });
 	const fetchImpl = (async () => response.clone()) as typeof fetch;
 	const authContext = {
 		async env(name: string) {
@@ -500,7 +500,7 @@ test("/fast toggles GPT payload routing, gates other models, survives model swit
 test("bounded bootstrap uses the provider refresh path without an extension cache", async () => {
 	const provider = createTinyllmProvider({
 		baseUrl: "http://gateway.test",
-		fetch: async () => Response.json({ data: [{ id: "anthropic/claude-sonnet-4-6" }] }),
+		fetch: async () => Response.json({ configured_models: [{ id: "anthropic/claude-sonnet-4-6" }] }),
 		warn: quiet,
 	});
 	await bootstrapProvider(provider, "fixture-key", "http://gateway.test");

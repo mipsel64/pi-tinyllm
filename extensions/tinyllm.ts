@@ -209,8 +209,12 @@ export async function discoverModels(
 		headers: { Authorization: `Bearer ${apiKey}` },
 		signal,
 	};
+	let modelKey: "configured_models" | "data" = "configured_models";
 	let response = await fetchImpl(`${root}/api/v1/models`, request);
-	if (response.status === 404) response = await fetchImpl(`${root}/v1/models`, request);
+	if (response.status === 404) {
+		modelKey = "data";
+		response = await fetchImpl(`${root}/v1/models`, request);
+	}
 	if (!response.ok) throw new Error(`TinyLLM model discovery failed with HTTP ${response.status}`);
 
 	let payload: unknown;
@@ -220,13 +224,18 @@ export async function discoverModels(
 		signal.throwIfAborted();
 		throw new Error("TinyLLM model discovery returned invalid JSON", { cause: error });
 	}
-	if (!payload || typeof payload !== "object" || !("data" in payload) || !Array.isArray(payload.data)) {
+	if (!payload || typeof payload !== "object") {
 		throw new Error("TinyLLM model discovery returned an invalid payload");
 	}
-	const discovery = providerCatalogs("providers" in payload ? payload.providers : undefined, warn);
+	const body = payload as Record<string, unknown>;
+	const configuredModels = body[modelKey];
+	if (!Array.isArray(configuredModels)) {
+		throw new Error("TinyLLM model discovery returned an invalid payload");
+	}
+	const discovery = providerCatalogs(body.providers, warn);
 	return mapDiscoveredModels(
 		[
-			...payload.data.map((entry) =>
+			...configuredModels.map((entry) =>
 				entry && typeof entry === "object" && "id" in entry ? (entry as { id?: unknown }).id : undefined,
 			),
 			...discovery.ids,
