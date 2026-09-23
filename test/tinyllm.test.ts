@@ -17,6 +17,7 @@ import {
 	mapDiscoveredModels,
 	normalizeBaseUrl,
 	registerFastMode,
+	registerProviderStatus,
 	rewriteFastPayload,
 } from "../extensions/tinyllm.ts";
 
@@ -376,6 +377,32 @@ test("streaming routes each catalog API through TinyLLM without changing the pub
 			},
 		],
 	);
+});
+
+test("provider status tracks session restores and model changes", () => {
+	const handlers = new Map<string, (event: any, ctx: any) => unknown>();
+	const pi = {
+		on(event: string, handler: (event: any, ctx: any) => unknown) {
+			handlers.set(event, handler);
+			return () => {};
+		},
+	} as unknown as ExtensionAPI;
+	registerProviderStatus(pi);
+
+	const statuses: Array<[string, string | undefined]> = [];
+	const context = (provider?: string) => ({
+		model: provider ? { provider } : undefined,
+		ui: { setStatus: (key: string, text: string | undefined) => statuses.push([key, text]) },
+	});
+	handlers.get("session_start")?.({}, context("tinyllm"));
+	handlers.get("model_select")?.({ model: { provider: "openai-codex" } }, context("tinyllm"));
+	handlers.get("session_tree")?.({}, context());
+
+	assert.deepEqual(statuses, [
+		["model-provider", "[tinyllm]"],
+		["model-provider", "[openai-codex]"],
+		["model-provider", undefined],
+	]);
 });
 
 test("/fast toggles GPT payload routing, gates other models, survives model switches, and restores session state", async () => {

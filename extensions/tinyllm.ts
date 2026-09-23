@@ -349,7 +349,16 @@ export function rewriteFastPayload(
 	return { ...request, model: `${request.model}-fast` };
 }
 
+const PROVIDER_STATUS = "model-provider";
 const FAST_STATE = "tinyllm-fast-mode";
+
+export function registerProviderStatus(pi: ExtensionAPI): void {
+	const update = (ctx: ExtensionContext, provider = ctx.model?.provider) =>
+		ctx.ui.setStatus(PROVIDER_STATUS, provider ? `[${provider}]` : undefined);
+	pi.on("session_start", (_event, ctx) => update(ctx));
+	pi.on("session_tree", (_event, ctx) => update(ctx));
+	pi.on("model_select", (event, ctx) => update(ctx, event.model.provider));
+}
 
 export function registerFastMode(pi: ExtensionAPI): void {
 	let enabled = false;
@@ -383,6 +392,7 @@ export function registerFastMode(pi: ExtensionAPI): void {
 }
 
 export default async function tinyllmExtension(pi: ExtensionAPI): Promise<void> {
+	registerProviderStatus(pi);
 	registerFastMode(pi);
 	const baseUrl = process.env.TINYLLM_BASE_URL ?? DEFAULT_BASE_URL;
 	const provider = createTinyllmProvider({ baseUrl });
