@@ -21,6 +21,8 @@ const SUPPORTED_APIS = new Map<Api, Api>([
 ]);
 
 type Warn = (message: string) => void;
+type BuiltinProvider = ReturnType<typeof getBuiltinProviders>[number];
+type CatalogMap = ReadonlyMap<string, BuiltinProvider>;
 
 export interface TinyllmProviderOptions {
 	baseUrl?: string;
@@ -38,10 +40,72 @@ export function apiBaseUrl(baseUrl: string, api: Api): string {
 	return api === "anthropic-messages" ? `${root}/anthropic` : `${root}/v1`;
 }
 
-function catalogCandidates(prefix: string): string[] {
+function isBuiltinProvider(value: string): value is BuiltinProvider {
+	return getBuiltinProviders().includes(value as BuiltinProvider);
+}
+
+function catalogCandidates(prefix: string, catalog?: BuiltinProvider): BuiltinProvider[] {
+	if (catalog) return [catalog];
 	if (prefix === "openai") return ["openai-codex", "openai"];
 	if (prefix === "codex") return ["openai-codex"];
-	return getBuiltinProviders().includes(prefix as ReturnType<typeof getBuiltinProviders>[number]) ? [prefix] : [];
+	return isBuiltinProvider(prefix) ? [prefix] : [];
+}
+
+function diagnostic(value: string): string {
+	const sanitized = value.replace(/[\u0000-\u001f\u007f-\u009f]/g, "?");
+	return sanitized.length > MAX_DIAGNOSTIC_ID_LENGTH
+		? `${sanitized.slice(0, MAX_DIAGNOSTIC_ID_LENGTH - 3)}...`
+		: sanitized;
+}
+
+function warnOmitted(label: string, omitted: string[], count: number, warn: Warn): void {
+	if (omitted.length === 0) return;
+	const suffix = count > omitted.length ? ` (+${count - omitted.length} more)` : "";
+	warn(`TinyLLM omitted ${label}: ${omitted.join(", ")}${suffix}`);
+}
+
+function providerCatalogs(
+	value: unknown,
+	warn: Warn,
+): { catalogs: Map<string, BuiltinProvider>; ids: string[] } {
+	const catalogs = new Map<string, BuiltinProvider>();
+	const ids: string[] = [];
+	if (value === undefined) return { catalogs, ids };
+	const entries = Array.isArray(value) ? value : [undefined];
+	const omitted: string[] = [];
+	let omittedCount = 0;
+	const omit = (description: string) => {
+		omittedCount++;
+		if (omitted.length < MAX_DIAGNOSTIC_IDS) omitted.push(diagnostic(description));
+	};
+
+	for (const entry of entries) {
+		if (!entry || typeof entry !== "object") {
+			omit("<invalid provider>");
+			continue;
+		}
+		const { id, type, auth } = entry as { id?: unknown; type?: unknown; auth?: unknown };
+		if (
+			typeof id !== "string"
+			|| !/^[A-Za-z0-9_.-]{1,64}$/.test(id)
+			|| typeof type !== "string"
+			|| (type === "openai" && auth !== "api_key" && auth !== "subscription")
+		) {
+			omit(typeof id === "string" && typeof type === "string" ? `${id}:${type}` : "<invalid provider>");
+			continue;
+		}
+		const catalogName = type === "openai" && auth === "subscription" ? "openai-codex" : type;
+		if (!isBuiltinProvider(catalogName)) {
+			omit(`${id}:${type}`);
+			continue;
+		}
+		if (catalogs.has(id)) continue;
+		catalogs.set(id, catalogName);
+		for (const model of getBuiltinModels(catalogName)) ids.push(`${id}/${model.id}`);
+	}
+
+	warnOmitted("invalid or unsupported providers", omitted, omittedCount, warn);
+	return { catalogs, ids };
 }
 
 function parsePublicId(publicId: string): { prefix: string; nativeId: string } | undefined {
@@ -51,11 +115,13 @@ function parsePublicId(publicId: string): { prefix: string; nativeId: string } |
 	return { prefix: publicId.slice(0, slash), nativeId: publicId.slice(slash + 1) };
 }
 
-function lookupCatalogModel(prefix: string, nativeId: string): Model<Api> | undefined {
-	for (const provider of catalogCandidates(prefix)) {
-		const model = getBuiltinModels(provider as Parameters<typeof getBuiltinModels>[0]).find(
-			(candidate) => candidate.id === nativeId,
-		);
+function lookupCatalogModel(
+	prefix: string,
+	nativeId: string,
+	catalogs: CatalogMap,
+): Model<Api> | undefined {
+	for (const provider of catalogCandidates(prefix, catalogs.get(prefix))) {
+		const model = getBuiltinModels(provider).find((candidate) => candidate.id === nativeId);
 		if (model) return model as Model<Api>;
 	}
 	return undefined;
@@ -78,6 +144,7 @@ export function mapDiscoveredModels(
 	ids: readonly unknown[],
 	baseUrl: string,
 	warn: Warn = console.warn,
+	catalogs: CatalogMap = new Map(),
 ): Model<Api>[] {
 	const models: Model<Api>[] = [];
 	const seen = new Set<string>();
@@ -85,11 +152,7 @@ export function mapDiscoveredModels(
 	let omittedCount = 0;
 	const omit = (id: string) => {
 		omittedCount++;
-		const sanitized = id.replace(/[\u0000-\u001f\u007f-\u009f]/g, "?");
-		const display = sanitized.length > MAX_DIAGNOSTIC_ID_LENGTH
-			? `${sanitized.slice(0, MAX_DIAGNOSTIC_ID_LENGTH - 3)}...`
-			: sanitized;
-		if (omitted.length < MAX_DIAGNOSTIC_IDS) omitted.push(display);
+		if (omitted.length < MAX_DIAGNOSTIC_IDS) omitted.push(diagnostic(id));
 	};
 
 	for (const value of ids) {
@@ -98,8 +161,13 @@ export function mapDiscoveredModels(
 			continue;
 		}
 		const discovered = parsePublicId(value);
+		const discoveredCatalog = discovered ? catalogs.get(discovered.prefix) : undefined;
 		if (
-			discovered?.prefix === "openai"
+			discovered
+			&& (discovered.prefix === "openai"
+				|| discovered.prefix === "codex"
+				|| discoveredCatalog === "openai"
+				|| discoveredCatalog === "openai-codex")
 			&& discovered.nativeId.startsWith("gpt-")
 			&& discovered.nativeId.endsWith("-fast")
 		) {
@@ -109,7 +177,7 @@ export function mapDiscoveredModels(
 		if (seen.has(publicId)) continue;
 		seen.add(publicId);
 		const parsed = parsePublicId(publicId);
-		const source = parsed ? lookupCatalogModel(parsed.prefix, parsed.nativeId) : undefined;
+		const source = parsed ? lookupCatalogModel(parsed.prefix, parsed.nativeId, catalogs) : undefined;
 		const api = source ? SUPPORTED_APIS.get(source.api) : undefined;
 		if (!parsed || !source || !api) {
 			omit(value);
@@ -125,10 +193,7 @@ export function mapDiscoveredModels(
 		});
 	}
 
-	if (omitted.length > 0) {
-		const suffix = omittedCount > omitted.length ? ` (+${omittedCount - omitted.length} more)` : "";
-		warn(`TinyLLM omitted unknown, malformed, or unsupported models: ${omitted.join(", ")}${suffix}`);
-	}
+	warnOmitted("unknown, malformed, or unsupported models", omitted, omittedCount, warn);
 	return models;
 }
 
@@ -139,10 +204,17 @@ export async function discoverModels(
 	fetchImpl: typeof fetch = fetch,
 	warn: Warn = console.warn,
 ): Promise<Model<Api>[]> {
-	const response = await fetchImpl(`${normalizeBaseUrl(baseUrl)}/v1/models`, {
+	const root = normalizeBaseUrl(baseUrl);
+	const request = {
 		headers: { Authorization: `Bearer ${apiKey}` },
 		signal,
-	});
+	};
+	let modelKey: "configured_models" | "data" = "configured_models";
+	let response = await fetchImpl(`${root}/api/v1/models`, request);
+	if (response.status === 404) {
+		modelKey = "data";
+		response = await fetchImpl(`${root}/v1/models`, request);
+	}
 	if (!response.ok) throw new Error(`TinyLLM model discovery failed with HTTP ${response.status}`);
 
 	let payload: unknown;
@@ -152,15 +224,25 @@ export async function discoverModels(
 		signal.throwIfAborted();
 		throw new Error("TinyLLM model discovery returned invalid JSON", { cause: error });
 	}
-	if (!payload || typeof payload !== "object" || !("data" in payload) || !Array.isArray(payload.data)) {
+	if (!payload || typeof payload !== "object") {
 		throw new Error("TinyLLM model discovery returned an invalid payload");
 	}
+	const body = payload as Record<string, unknown>;
+	const configuredModels = body[modelKey];
+	if (!Array.isArray(configuredModels)) {
+		throw new Error("TinyLLM model discovery returned an invalid payload");
+	}
+	const discovery = providerCatalogs(body.providers, warn);
 	return mapDiscoveredModels(
-		payload.data.map((entry) =>
-			entry && typeof entry === "object" && "id" in entry ? (entry as { id?: unknown }).id : undefined,
-		),
+		[
+			...configuredModels.map((entry) =>
+				entry && typeof entry === "object" && "id" in entry ? (entry as { id?: unknown }).id : undefined,
+			),
+			...discovery.ids,
+		],
 		baseUrl,
 		warn,
+		discovery.catalogs,
 	);
 }
 
@@ -260,7 +342,7 @@ export async function bootstrapProvider(provider: Provider<Api>, apiKey: string,
 }
 
 export function isFastCapable(model: Pick<Model<Api>, "provider" | "id"> | undefined): boolean {
-	return model?.provider === "tinyllm" && /^openai\/gpt-.+/.test(model.id) && !model.id.endsWith("-fast");
+	return model?.provider === "tinyllm" && /^[^/]+\/gpt-.+/.test(model.id) && !model.id.endsWith("-fast");
 }
 
 export function rewriteFastPayload(
@@ -276,10 +358,20 @@ export function rewriteFastPayload(
 	return { ...request, model: `${request.model}-fast` };
 }
 
+const PROVIDER_STATUS = "model-provider";
 const FAST_STATE = "tinyllm-fast-mode";
+
+export function registerProviderStatus(pi: ExtensionAPI): void {
+	const update = (ctx: ExtensionContext, provider = ctx.model?.provider) =>
+		ctx.ui.setStatus(PROVIDER_STATUS, provider ? `[${provider}]` : undefined);
+	pi.on("session_start", (_event, ctx) => update(ctx));
+	pi.on("session_tree", (_event, ctx) => update(ctx));
+	pi.on("model_select", (event, ctx) => update(ctx, event.model.provider));
+}
 
 export function registerFastMode(pi: ExtensionAPI): void {
 	let enabled = false;
+	const updateStatus = (ctx: ExtensionContext) => ctx.ui.setStatus(FAST_STATE, enabled ? "fast" : undefined);
 	const restore = (ctx: ExtensionContext) => {
 		enabled = false;
 		for (const entry of ctx.sessionManager.getBranch()) {
@@ -287,6 +379,7 @@ export function registerFastMode(pi: ExtensionAPI): void {
 				enabled = (entry.data as { enabled?: unknown } | undefined)?.enabled === true;
 			}
 		}
+		updateStatus(ctx);
 	};
 
 	pi.on("session_start", (_event, ctx) => restore(ctx));
@@ -296,17 +389,19 @@ export function registerFastMode(pi: ExtensionAPI): void {
 		description: "Toggle TinyLLM fast routing for the selected OpenAI GPT model",
 		handler: async (_args, ctx) => {
 			if (!isFastCapable(ctx.model)) {
-				ctx.ui.notify("/fast is only available for TinyLLM openai/gpt-* models", "warning");
+				ctx.ui.notify("/fast is only available for TinyLLM OpenAI GPT models", "warning");
 				return;
 			}
 			enabled = !enabled;
 			pi.appendEntry(FAST_STATE, { enabled });
+			updateStatus(ctx);
 			ctx.ui.notify(`TinyLLM fast routing ${enabled ? "enabled" : "disabled"}`, "info");
 		},
 	});
 }
 
 export default async function tinyllmExtension(pi: ExtensionAPI): Promise<void> {
+	registerProviderStatus(pi);
 	registerFastMode(pi);
 	const baseUrl = process.env.TINYLLM_BASE_URL ?? DEFAULT_BASE_URL;
 	const provider = createTinyllmProvider({ baseUrl });
