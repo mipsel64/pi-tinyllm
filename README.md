@@ -60,6 +60,23 @@ pi --provider tinyllm --model anthropic/claude-sonnet-4-6
 - Pi owns the persisted model catalog. Failed refreshes retain the last known good catalog, and offline refreshes restore it.
 - Pi 0.87.1 performs only a cache refresh after registering an extension provider. This package does one bounded first-run discovery before registration so `--list-models` works with environment configuration. Pi may then restore an older persisted catalog during the same startup; a later native catalog refresh reconciles it. The package does not maintain a second cache.
 
+## Publishing
+
+npm requires the first version to exist before trusted publishing can be configured. Publish `0.1.0` once with `npm login && npm publish`, then add this trusted publisher in the package settings on npmjs.com:
+
+- Organization or user: `mipsel64`
+- Repository: `pi-tinyllm`
+- Workflow: `release.yml`
+- Environment: leave blank
+- Allowed action: `npm publish`
+
+Future releases are tokenless and include npm provenance:
+
+```sh
+npm version patch
+git push origin main --follow-tags
+```
+
 ## Development
 
 ```sh

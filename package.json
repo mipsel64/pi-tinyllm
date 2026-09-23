@@ -12,6 +12,9 @@
     "url": "https://github.com/mipsel64/pi-tinyllm/issues"
   },
   "homepage": "https://github.com/mipsel64/pi-tinyllm#readme",
+  "publishConfig": {
+    "access": "public"
+  },
   "files": [
     "extensions"
   ],
