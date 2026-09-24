@@ -9,8 +9,10 @@ A standalone [Pi](https://pi.dev) package that discovers models from a local [Ti
 Install the published package:
 
 ```sh
-pi install npm:pi-tinyllm
+pi install npm:@mipsel64/pi-tinyllm
 ```
+
+Earlier versions were published as `pi-tinyllm`, which is now deprecated. To switch, run `pi remove npm:pi-tinyllm` before installing.
 
 Or install the current GitHub version:
 
@@ -62,7 +64,7 @@ pi --provider tinyllm --model anthropic/claude-sonnet-4-6
 
 ## Publishing
 
-npm requires the first version to exist before trusted publishing can be configured. Publish `0.1.0` once with `npm login && npm publish`, then add this trusted publisher in the package settings on npmjs.com:
+The package is published as `@mipsel64/pi-tinyllm` by the `mipsel64` npm organization. npm requires the first version to exist before trusted publishing can be configured, so publish it once with `npm login && npm publish --access public`, then add this trusted publisher in the package settings on npmjs.com:
 
 - Organization or user: `mipsel64`
 - Repository: `pi-tinyllm`
