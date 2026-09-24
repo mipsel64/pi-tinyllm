@@ -1,5 +1,5 @@
 {
-  "name": "pi-tinyllm",
+  "name": "@mipsel64/pi-tinyllm",
   "version": "0.1.2",
   "description": "Dynamic TinyLLM provider package for Pi",
   "type": "module",
